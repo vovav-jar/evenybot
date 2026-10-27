@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# secrets / local env
+.env
+.env.*
+
+# runtime cache
+spooky_last.txt
+spooky_last_ts.txt
+*.session
+*.session-journal
+
+# local scripts data
+tg-profile/
