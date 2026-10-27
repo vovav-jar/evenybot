@@ -11,6 +11,7 @@ Env:
 
 После деплоя достаточно открыть публичный URL приложения в браузере -
 webhook зарегистрируется сам. Если задан WEBHOOK_URL, он ставится при старте.
+Регистрация идёт в фоновом потоке, чтобы не тормозить health-check хостинга.
 """
 import os
 import threading
@@ -27,6 +28,7 @@ app = Flask(__name__)
 
 _lock = threading.Lock()
 _registered = False
+_pending = False
 
 
 def _public_base() -> str:
@@ -42,32 +44,41 @@ def _public_base() -> str:
     return f"{proto}://{host}"
 
 
-def _ensure_webhook(base: str) -> None:
-    """Ставит webhook один раз за жизнь процесса. Ошибки не роняют приложение."""
-    global _registered
-    if not TOKEN or not base or _registered:
-        return
-    with _lock:
-        if _registered:
+def _set_webhook(base: str) -> None:
+    global _registered, _pending
+    try:
+        if not TOKEN or not base or _registered:
             return
-        url = f"{base}/{TOKEN}"
-        try:
-            info = botmod.bot.get_webhook_info()
-            if getattr(info, "url", "") == url:
-                _registered = True
-                botmod.log.info("webhook already set to %s", base)
+        with _lock:
+            if _registered:
                 return
-            botmod.bot.remove_webhook()
-            botmod.bot.set_webhook(url=url, allowed_updates=None)
+            url = f"{base}/{TOKEN}"
+            info = botmod.bot.get_webhook_info()
+            if getattr(info, "url", "") != url:
+                botmod.bot.set_webhook(url=url, allowed_updates=None)
             _registered = True
             botmod.log.info("webhook set to %s", base)
-        except Exception as e:  # noqa: BLE001
-            botmod.log.warning("webhook setup failed: %s", e)
+    except Exception as e:  # noqa: BLE001
+        botmod.log.warning("webhook setup failed: %s", e)
+    finally:
+        _pending = False
+
+
+def _kick_webhook(base: str) -> None:
+    """Запускает регистрацию webhook в фоне, не блокируя HTTP-ответ."""
+    global _pending
+    if not TOKEN or not base or _registered or _pending:
+        return
+    with _lock:
+        if _registered or _pending:
+            return
+        _pending = True
+    threading.Thread(target=_set_webhook, args=(base,), daemon=True).start()
 
 
 @app.route("/", methods=["GET"])
 def index():
-    _ensure_webhook(_public_base())
+    _kick_webhook(_public_base())
     return "ok", 200
 
 
@@ -89,15 +100,7 @@ def updates():
 
 
 if TOKEN and PUBLIC_URL:
-    # На хостинге с WEBHOOK_URL регистрируем сразу, не дожидаясь запроса.
-    with app.app_context():
-        try:
-            botmod.bot.remove_webhook()
-            botmod.bot.set_webhook(url=f"{PUBLIC_URL}/{TOKEN}", allowed_updates=None)
-            _registered = True
-            botmod.log.info("webhook set to %s", PUBLIC_URL)
-        except Exception as e:  # noqa: BLE001
-            botmod.log.warning("webhook setup failed: %s", e)
+    _kick_webhook(PUBLIC_URL)
 
 
 if __name__ == "__main__":
